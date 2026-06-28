@@ -136,6 +136,16 @@ the out-of-range case a runtime indirect call instead of `__builtin_trap()`.
 Together with the recovered tables it both fixes a class of latent crashes and
 makes an imperfect table degrade gracefully. See [patches/README.md](patches/README.md).
 
+## Function-boundary overrides
+
+A separate class of manual work: the recompiler splits some functions at the
+wrong address and teams fix it by hand (the Skate 3 port ships ~3500 `end` /
+`parent` overrides). These split points are *not* in the binary — but they fall
+out of the recompiler's own discovery grid via two trivial rules. On Skate 3,
+`src/boundaries.py` reproduces **1107/1160 (95%)** of the `parent` and
+**1250/1740 (72%)** of the `end` overrides, with no answer key. See
+[docs/boundaries.md](docs/boundaries.md).
+
 ## Scope and limits
 
 - 32-bit big-endian PowerPC, Xbox 360 layout. The idiom recognisers assume the
