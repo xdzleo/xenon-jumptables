@@ -44,6 +44,23 @@ OUT_PATH = CFG.get("output", "jumptables.json")
 FUNC_PATH = CFG.get("functions")          # optional: one hex address per line
 MAX_TABLE = int(CFG.get("max_table_entries", 4096))
 
+# Speed: the jump-table walk needs correct disassembly and data refs, nothing
+# else — not FLIRT signatures, stack/argument propagation, no-return tracing, or
+# the final cleanup pass. Dropping those analysis flags cuts auto-analysis time
+# substantially on a large image with no effect on what the recogniser reads.
+try:
+    import ida_ida
+    _af = ida_ida.inf_get_af()
+    for _n in ("AF_FLIRT", "AF_SIGMLT", "AF_SIGCMT", "AF_HFLIRT", "AF_LVAR",
+               "AF_STKARG", "AF_REGARG", "AF_TRACE", "AF_VERSP", "AF_ANORET",
+               "AF_NULLSUB", "AF_FINAL"):
+        _af &= ~getattr(ida_ida, _n, 0)
+    ida_ida.inf_set_af(_af)
+    print("[xjt] reduced analysis flags for speed")
+except Exception as _e:
+    print("[xjt] note: could not reduce analysis flags (%s)" % _e)
+
+print("[xjt] analyzing image...")
 ida_auto.auto_wait()
 
 # --- function coverage ------------------------------------------------------
@@ -56,11 +73,14 @@ if FUNC_PATH:
     with open(FUNC_PATH) as f:
         FUNCS = sorted({int(l.strip(), 16) for l in f if l.strip()})
     added = 0
-    for ea in FUNCS:
+    for i, ea in enumerate(FUNCS):
         fn = ida_funcs.get_func(ea)
         if fn is None or fn.start_ea != ea:
             if ida_funcs.add_func(ea):
                 added += 1
+        if i % 4000 == 0 and i:
+            print("[xjt] progress defining %d/%d" % (i, len(FUNCS)))
+    print("[xjt] analyzing functions...")
     ida_auto.auto_wait()
     print("[xjt] functions=%d (add_func=%d)" % (len(FUNCS), added))
 else:
@@ -471,7 +491,9 @@ print("[xjt] raw bctr opcodes=%d" % len(RAW))
 found = {}
 for rnd in range(8):
     new = 0
-    for b in RAW:
+    for i, b in enumerate(RAW):
+        if rnd == 0 and i % 3000 == 0 and i:
+            print("[xjt] progress scanning %d/%d (tables=%d)" % (i, len(RAW), len(found)))
         if b in found:
             continue
         force_window(b)
