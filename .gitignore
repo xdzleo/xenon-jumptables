@@ -1,0 +1,30 @@
+# never commit game dumps or recompiler artifacts
+*.bin
+*.elf
+*.xex
+*.iso
+
+# IDA databases
+*.i64
+*.idb
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+
+# tool outputs (default names + a recommended /out working dir for custom names)
+jumptables.json
+*.idalog.txt
+*.cfg.json
+switch_tables.toml
+functions.txt
+/out/
+
+# local configs (keep examples/ only)
+/config.json
+/*.local.json
+
+# python
+__pycache__/
+*.pyc
