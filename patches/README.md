@@ -77,3 +77,33 @@ it has no `build_bctr` / `control_flow.cpp`; its `bctr` codegen is inline in
 (`switch (r(switchTable.r).u64)`), so it has the same latent issue. The patch
 won't apply there — make the equivalent change by hand. After patching, rebuild
 the recompiler and regenerate.
+
+---
+
+# `dump-image` helper patch
+
+[`dump-image.patch`](dump-image.patch) is an optional convenience for the
+**input** side of the workflow, not a correctness fix. The jump-table pass needs
+a raw image of the *decompressed, decrypted* guest code — but a XEX is usually
+LZX-compressed and AES-encrypted, so you cannot just analyse the file on disk.
+The recompiler already decompresses and decrypts it into guest memory; this patch
+just writes that image out.
+
+It adds, right after ReXGlue builds the executable `BinaryView`
+(`src/codegen/project_recompiler.cpp`), a guarded dump: if the environment
+variable `REX_DUMP_IMAGE` is set, it reconstructs a contiguous image (each section
+copied to `section_base - image_base`; header/padding gaps stay zero) and writes
+it there. With the variable unset, codegen is byte-for-byte unchanged.
+
+```sh
+cd <your ReXGlue checkout>
+git apply /path/to/dump-image.patch
+# rebuild, then:
+REX_DUMP_IMAGE=game.bin rexglue codegen your_manifest.toml
+```
+
+`game.bin` is then the `image` for [`config.example.json`](../examples/config.example.json),
+with `image_base` / `text_start` / `text_end` taken from the ranges ReXGlue logs
+at `--log-level trace` (`BinaryView: section '.text' at … size …`). XenonRecomp
+has its own image-loading path; the equivalent there is to dump the mapped image
+after it loads the XEX.

@@ -26,19 +26,29 @@ not match, so it silently treats the `bctr` as a tail call:
   to an anchor (`target = anchor + table[i]*scale`), not a table of pointers.
 - **Tables embedded inline in `.text`**, immediately after the `bctr`.
 
-On one retail title (a ~7 MB image, ~11k functions) the difference is stark:
+Measured on two independent retail titles, each with the recompiler's full
+function list defined in IDA so every `bctr` is analysed (not just those reachable
+from the entry point):
 
-| | switch tables resolved |
-|---|---|
-| IDA 9.2 auto-analysis + Hex-Rays | 6 |
-| Ghidra 12 auto-analysis | 7 |
-| **xenon-jumptables** | **74** |
+| switch tables resolved | Title A (~7 MB, ~11k funcs) | Title B (~9 MB, ~17k funcs) |
+|---|---|---|
+| IDA 9.2 auto-analysis + Hex-Rays | 6 | 74 |
+| Ghidra 12 auto-analysis | 7 | — |
+| **xenon-jumptables** | **74** | **186** |
 
-The 74 were independently re-derived from the raw bytes and cross-checked, and
-agree with the recompiler's own (smaller) set on the shared subset. Counts are
-per-title; the idioms they exercise are not. Whether a given title needs this at
-all depends on its compiler — some emit only the textbook idiom the recompiler
-already handles; others (the table above) lean on the ones it doesn't.
+Every table the tool emits was independently re-derived from the raw bytes —
+each target is the pointer read at `table + i·4` (absolute) or `anchor +
+tableN[i]·scale` (the two-level "relative" form) — and cross-checked against IDA
+on the shared subset, where the two agree exactly (identical case counts). On
+Title B that shared subset is 73 plain absolute tables both find; the tool's
+remaining **113 are the two-level relative tables IDA treats as tail calls**.
+(IDA in turn resolves one table the tool skips — its bound check sits ~190
+instructions and many blocks back from the `bctr`, past where localized matching
+follows; see [Scope and limits](#scope-and-limits).)
+
+How much a title needs this depends on its compiler's idiom mix: Title A leans
+almost entirely on idioms IDA misses (12× gain), Title B on a mix (still 2.5×).
+The idioms are not per-title; the counts are.
 
 ## How it works
 
@@ -156,6 +166,12 @@ out of the recompiler's own discovery grid via two trivial rules. On Skate 3,
 - A target list is only emitted when the table is proven: a static base, a
   bound, and every entry a valid in-`.text` instruction address. Ambiguous cases
   are skipped rather than guessed.
+- The bound check is found by walking back from the `bctr` and stopping at block
+  boundaries, so a compare from another path is never mistaken for it. The trade
+  is that a bound sitting many blocks before the dispatch (a whole-function
+  dataflow question) is not followed — a full decompiler may catch those (one
+  such absolute table in Title B above). This is deliberately conservative: it
+  trades a rare miss for never emitting a wrong bound.
 - It needs no game binaries to be checked in here, and you should not commit
   yours — keep dumps out of the repo.
 
