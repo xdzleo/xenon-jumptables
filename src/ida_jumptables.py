@@ -21,8 +21,13 @@ The config path is read from IDA's script argv. See examples/config.example.json
 """
 import json
 import bisect
+import time as _time
 import idaapi, idautils, idc
 import ida_auto, ida_bytes, ida_funcs, ida_ua, ida_xref, ida_pro
+
+_T0 = _time.time()
+def _lap(tag):
+    print("[xjt] timing %-18s %6.1fs" % (tag, _time.time() - _T0))
 
 
 # --- config -----------------------------------------------------------------
@@ -62,6 +67,7 @@ except Exception as _e:
 
 print("[xjt] analyzing image...")
 ida_auto.auto_wait()
+_lap("initial-analysis")
 
 # --- function coverage ------------------------------------------------------
 # Static recompilers know every function boundary (from the XEX .pdata). Feeding
@@ -83,6 +89,7 @@ if FUNC_PATH:
     print("[xjt] analyzing functions...")
     ida_auto.auto_wait()
     print("[xjt] functions=%d (add_func=%d)" % (len(FUNCS), added))
+    _lap("func-analysis")
 else:
     print("[xjt] no function list given; relying on IDA auto-analysis")
 
@@ -142,7 +149,14 @@ def force_window(bctr):
     a = max(func_start_of(bctr), bctr - 4 * 28)
     while a <= bctr:
         if not ida_bytes.is_code(ida_bytes.get_flags(a)):
-            ida_ua.create_insn(a)
+            # create_insn fails silently if these bytes are already defined as
+            # DATA (an array / .long IDA left inside .text) — which leaves the
+            # whole idiom unreadable and the table unrecovered (e.g. budokai3
+            # 0x8221a930, a clean 512-case rel table the recogniser handles but
+            # never saw as code). Undefine the stale data item first, then convert.
+            if not ida_ua.create_insn(a):
+                ida_bytes.del_items(a, 0, 4)
+                ida_ua.create_insn(a)
         a += 4
 
 
@@ -485,6 +499,7 @@ def all_bctr_raw():
 
 RAW = all_bctr_raw()
 print("[xjt] raw bctr opcodes=%d" % len(RAW))
+_lap("bctr-scan")
 
 # Iterate: resolving a table reveals its case bodies as code, which may contain
 # further bctrs. Loop until a round finds nothing new (coverage fixpoint).
@@ -528,5 +543,6 @@ with open(OUT_PATH, "w") as fp:
     fp.write(json.dumps({"_summary": True, "tables": len(found),
                          "raw_bctr": len(RAW)}) + "\n")
 
+_lap("recognition")
 print("[xjt] DONE tables=%d  ->  %s" % (len(found), OUT_PATH))
 ida_pro.qexit(0)
