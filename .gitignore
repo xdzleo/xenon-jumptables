@@ -28,3 +28,8 @@ functions.txt
 # python
 __pycache__/
 *.pyc
+
+# scratch / prototype run artifacts
+*.log
+*.pre_*.bak
+_deep_extract.log
