@@ -8,20 +8,10 @@ ADDITIVE, superset-only overlay the pipeline folds into <name>_functions.toml:
   (1) funcmap   -- every function IDA's flow/cref/no-return analysis discovered
                    (catches lis/addi-referenced targets the linear .pdata scan can
                     reach but our resolver's flow scan misses)
-  (2) data-xref -- big-endian dwords ANYWHERE in the image (all segments, incl.
-                   .text-embedded pointer tables) that point at a code target that
-                   is either already is_code OR prologue-shaped. Load-bearing: an
-                   empirical study of 1438 converged run-heal cures across 6 titles
-                   showed ~85% are address-taken somewhere -- but the old scan only
-                   looked at NON-text data and required target already-is_code,
-                   missing pointer tables in .text and functions IDA parked as data.
-  (3) prologue  -- a linear sweep of the code range for PPC function prologues
-                   (mflr/mfspr r12,LR; stwu r1,-N; bl __savegprlr) that no pointer
-                   references and IDA did not map -- the FIFA-class function that
-                   starts right after a blr with mflr as its 2nd/3rd word.
-  Every candidate is ADDITIVE + superset-only; the pipeline's pure-add gate re-runs
-  codegen and drops any that would split/stub/dangle, so a false positive from the
-  widened scan is rejected safely (byte-identical fleet).
+  (2) data-xref -- big-endian dwords in NON-text data that point at is_code text
+                   (the vtable / address-taken target class -- the load-bearing
+                    NEW signal: exactly the "invalid function"/PPC_CALL_INDIRECT
+                    class we heal reactively at runtime today)
 
 Config (JSON, path in argv[1] via idat -S"deep_extract.py cfg.json"):
   { "image_base":..., "text_start":..., "text_end":..., "image_end":...,
@@ -70,75 +60,95 @@ def run(cfg):
         except OSError:
             pass
 
-    # A PPC function prologue in the first few instructions: mfspr r0/r12,LR
-    # (mflr), stwu r1,-N(r1), or a leading bl to a __savegprlr save-thunk. Lets us
-    # accept a pointer target IDA parked as data, and find pointer-less functions.
-    def _prologue(a):
-        for i in range(4):
-            w = ida_bytes.get_dword(a + i * 4)
-            if w in (0x7C0802A6, 0x7D8802A6):        # mfspr rX,LR (mflr r0 / r12)
-                return True
-            if (w >> 16) == 0x9421:                  # stwu r1,-N(r1)
-                return True
-            if (w >> 26) == 18 and (w & 1):          # bl (savegpr/restgpr thunk)
-                return True
-        return False
-
-    def _plausible_target(v):
-        # 4-aligned, in text, and either IDA-mapped code or prologue-shaped.
-        return in_text(v) and (v & 3) == 0 and (
-            ida_bytes.is_code(ida_bytes.get_flags(v)) or _prologue(v))
-
     # (1) funcmap
     funcs = set(idautils.Functions(TS, TE))
 
-    # (2) data-xref: dwords ANYWHERE in the image (all segments, including .text
-    # pointer tables) that point at a plausible code target. The old scan skipped
-    # in-text dwords and required target already-is_code; both cost real cures.
+    # (2) data-xref: non-text dwords pointing at is_code text; remember a source addr
     dataref = {}
     ea = BASE
+    step = 4
     while ea < IMG_END:
-        v = ida_bytes.get_dword(ea)
-        if _plausible_target(v) and v not in dataref:
-            dataref[v] = ea
-        ea += 4
+        if not in_text(ea):
+            v = ida_bytes.get_dword(ea)
+            if in_text(v) and (v & 3) == 0 and ida_bytes.is_code(ida_bytes.get_flags(v)):
+                if v not in dataref:
+                    dataref[v] = ea
+        ea += step
 
-    # (3) prologue sweep: prologue-shaped starts in the code range that no pointer
-    # references and IDA did not map. Anchor on a return terminator preceding the
-    # candidate (blr / bctr / bclr-family) to cut false positives -- a real
-    # function boundary follows the previous function's epilogue.
-    RET = (0x4E800020, 0x4E800420)  # blr, bctr
-    prologue = set()
+    # (3) split-immediate (lis/addi | lis/ori) code-address materialization -- the
+    # SPLITIMM class, ~31% of the run-heal residue (a 20-port census). The SDK has
+    # a functionPointerScan for exactly this but it is DISABLED (analyze.cpp:59,
+    # "too many false positives") because it registered targets DIRECTLY. Here it
+    # is safe: the candidates flow through the pipeline's pure-add gate, which
+    # re-runs codegen and drops any split/stub/swallow. Track the most-recent lis
+    # hi-half per GPR across a text linear scan; on a following addi/ori that
+    # forms an in-text address, emit it -- but only if it is NOT the interior of a
+    # known function (the HEAD guardrail: an interior alternate-entry must never
+    # become a {} function, which would skip frame setup = silent stack corruption
+    # -- census-confirmed on Forza 0x82489360).
+    splitimm = {}
+    lis_hi = [None] * 32
     ea = TS
     while ea < TE:
-        if ea not in funcs and ea not in dataref:
-            prev = ida_bytes.get_dword(ea - 4)
-            is_ret = prev in RET or (prev & 0xFC0007FE) == 0x4C000020  # bclr family
-            if is_ret and _prologue(ea):
-                prologue.add(ea)
+        if not ida_bytes.is_code(ida_bytes.get_flags(ea)):
+            ea += 4
+            continue
+        w = ida_bytes.get_dword(ea)
+        op = w >> 26
+        rt = (w >> 21) & 31
+        ra = (w >> 16) & 31
+        if op == 15:                     # addis/lis: rt = (ra? ra : 0) + (imm<<16)
+            if ra == 0:
+                lis_hi[rt] = (w & 0xFFFF) << 16
+            else:
+                lis_hi[rt] = None        # addis off another reg -> not a plain hi-load
+        elif op == 14 and ra != 0 and lis_hi[ra] is not None:   # addi rt,ra,lo (signed)
+            lo = w & 0xFFFF
+            if lo & 0x8000:
+                lo -= 0x10000
+            full = (lis_hi[ra] + lo) & 0xFFFFFFFF
+            if in_text(full) and (full & 3) == 0 and full not in splitimm:
+                fn = ida_funcs.get_func(full)
+                if fn is None or fn.start_ea == full:   # HEAD gate: never mid-function
+                    splitimm[full] = ea
+            lis_hi[rt] = None            # rt now holds an address, not a hi-half
+        elif op == 24 and lis_hi[ra] is not None:               # ori rt,ra,lo (unsigned)
+            full = (lis_hi[ra] | (w & 0xFFFF)) & 0xFFFFFFFF
+            if in_text(full) and (full & 3) == 0 and full not in splitimm:
+                fn = ida_funcs.get_func(full)
+                if fn is None or fn.start_ea == full:
+                    splitimm[full] = ea
+            lis_hi[rt] = None
+        else:
+            # any other write to rt invalidates its tracked hi-half (conservative)
+            if op in (12, 13, 28, 29) or (op == 31):   # addic/addic./andi/andis/X-form
+                if rt < 32:
+                    lis_hi[rt] = None
         ea += 4
 
-    union = funcs | set(dataref) | prologue
+    union = funcs | set(dataref) | set(splitimm)
     out = []
     for a in sorted(union):
         if a in known:
             continue
         if (a & 3) != 0 or not in_text(a):
             continue
-        # accept IDA-code OR prologue-shaped (the widened target class); the
-        # pure-add gate downstream drops anything that would corrupt.
-        if not (ida_bytes.is_code(ida_bytes.get_flags(a)) or _prologue(a)):
+        # accept IDA-code OR a split-immediate target (a lis/addi may materialize a
+        # real function IDA parked as data; the pure-add gate is the final arbiter).
+        if not (ida_bytes.is_code(ida_bytes.get_flags(a)) or a in splitimm):
             continue
         tags = []
         if a in funcs:
             tags.append("funcmap")
         if a in dataref:
             tags.append("dataref")
-        if a in prologue:
-            tags.append("prologue")
+        if a in splitimm:
+            tags.append("splitimm")
         rec = {"addr": "0x%08X" % a, "src": "+".join(tags)}
         if a in dataref:
-            rec["ptr_ref"] = "0x%08X" % dataref[a]
+            rec["vtbl_ref"] = "0x%08X" % dataref[a]
+        if a in splitimm:
+            rec["imm_ref"] = "0x%08X" % splitimm[a]
         out.append(rec)
 
     # emit: additive superset-only overlay in heal.py's {} format + provenance json
@@ -151,11 +161,11 @@ def run(cfg):
             f.write('"%s" = {}\n' % r["addr"])
     with open(cfg["out_json"], "w", encoding="utf-8") as f:
         json.dump({"count": len(out), "funcmap": len(funcs), "dataref": len(dataref),
-                   "prologue": len(prologue), "union": len(union),
+                   "splitimm": len(splitimm), "union": len(union),
                    "known_excluded": len(known & union), "emitted": out}, f, indent=1)
-    print("[deep_extract] emitted %d new starts (funcmap=%d dataref=%d prologue=%d union=%d, "
+    print("[deep_extract] emitted %d new starts (funcmap=%d dataref=%d splitimm=%d union=%d, "
           "excluded %d known)"
-          % (len(out), len(funcs), len(dataref), len(prologue), len(union),
+          % (len(out), len(funcs), len(dataref), len(splitimm), len(union),
              len(known & union)))
 
 
