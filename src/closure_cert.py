@@ -97,13 +97,19 @@ def main():
                 lo=w&0xFFFF
                 if lo&0x8000: lo-=0x10000
                 full=(lis_hi[ra]+lo)&0xFFFFFFFF
-                if cb<=full<ce: targets["splitimm"].add(full)
+                # A lis/addi product is only a candidate FUNCTION start if it
+                # could be one: 4-aligned (unaligned = data constant, ben_10
+                # 0x82130001) and the destination dword is not zero (a zero
+                # dword is padding, not an instruction -- ben_10 0x82130004
+                # pointed into a zero-padded gap). Both are decidable from the
+                # image, so filtering them keeps the cert exact, not lenient.
+                if cb<=full<ce and (full&3)==0 and word(full-ib): targets["splitimm"].add(full)
             lis_hi[rt]=None
         elif op == 24:
             rt=(w>>21)&31; ra=(w>>16)&31
             if lis_hi[ra] is not None:
                 full=(lis_hi[ra]|(w&0xFFFF))&0xFFFFFFFF
-                if cb<=full<ce: targets["splitimm"].add(full)
+                if cb<=full<ce and (full&3)==0 and word(full-ib): targets["splitimm"].add(full)
             lis_hi[rt]=None
         o += 4
     # pointers in non-text data
