@@ -14,7 +14,13 @@ import argparse
 import os
 import re
 
-PAT = re.compile(r"(?:PPC_FUNC(?:_IMPL)?|DEFINE_REX_FUNC)\(\s*(?:__imp__)?sub_([0-9A-Fa-f]{8})")
+# The optional \w+_ prefix covers companion-module symbols: a multi-XEX module
+# emits DEFINE_REX_FUNC(<module>_sub_XXXXXXXX) (e.g. fifadllzf_sub_8270D500),
+# while the entrypoint emits the bare sub_XXXXXXXX form. Without it the
+# extractor returned 0 functions for every companion -> empty known-list ->
+# deep-extract fed IDA everything as "new" (fifadllzf: 93746 candidates) and
+# the pure-add gate spent ~40 minutes rejecting the lot.
+PAT = re.compile(r"(?:PPC_FUNC(?:_IMPL)?|DEFINE_REX_FUNC)\(\s*(?:__imp__)?(?:\w+_)?sub_([0-9A-Fa-f]{8})")
 
 
 def main():
